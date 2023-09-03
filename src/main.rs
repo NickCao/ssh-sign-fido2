@@ -1,5 +1,7 @@
 use byteorder::BigEndian as E;
 use byteorder::WriteBytesExt;
+use ctap_hid_fido2::Cfg;
+use ctap_hid_fido2::FidoKeyHidFactory;
 use ed25519_dalek::{Signature, Signer, SigningKey};
 use pem::Pem;
 use rand::rngs::OsRng;
@@ -125,26 +127,40 @@ fn encode_signature(r#type: &str, signature: &[u8], flags: u8, counter: u32) -> 
     buf
 }
 
-fn sign(signer: ed25519_dalek::SigningKey, message: &[u8], flags: u8, counter: u32) {
+fn sign(message: &[u8]) {
     const TYPE: &str = "sk-ssh-ed25519@openssh.com";
     const HASH_ALGO: &str = "sha512";
     const NAMESPACE: &str = "git";
-    const APPLICATION: &str = "ssh:something";
+    const APPLICATION: &str = "ssh:signing";
+    const PIN: Option<&str> = None;
 
-    let signature: Signature = signer.sign(&encode_wrapped_signed_data(
-        APPLICATION,
-        flags,
-        counter,
-        &encode_signed_data(NAMESPACE, HASH_ALGO, &Sha512::digest(message)),
-    ));
+    let mut config = Cfg::init();
+    config.keep_alive_msg = "".to_string();
 
-    // println!("sk-ssh-ed25519@openssh.com {}", base64::encode(&publickey));
+    let device = FidoKeyHidFactory::create(&config).unwrap();
+
+    let assertion = &device
+        .get_assertions_rk(
+            APPLICATION,
+            &encode_signed_data(NAMESPACE, HASH_ALGO, &Sha512::digest(message)),
+            PIN,
+        )
+        .unwrap()[0];
+
+    let cred = &device
+        .credential_management_enumerate_credentials(PIN, &assertion.rpid_hash)
+        .unwrap()[0];
 
     let signature = encode_signature_blob(
-        &encode_publickey(TYPE, signer.verifying_key().as_bytes(), APPLICATION),
+        &encode_publickey(TYPE, &cred.public_key.der, APPLICATION),
         NAMESPACE,
         HASH_ALGO,
-        &encode_signature(TYPE, &signature.to_vec(), flags, counter),
+        &encode_signature(
+            TYPE,
+            &assertion.signature,
+            assertion.flags.as_u8(),
+            assertion.sign_count,
+        ),
     );
 
     let config = pem::EncodeConfig::new();
@@ -158,7 +174,5 @@ fn sign(signer: ed25519_dalek::SigningKey, message: &[u8], flags: u8, counter: u
 }
 
 fn main() {
-    let mut csprng = OsRng;
-    let signing_key: SigningKey = SigningKey::generate(&mut csprng);
-    sign(signing_key, b"hello", 4, 1000);
+    sign(b"hello");
 }
