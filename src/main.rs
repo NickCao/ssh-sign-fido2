@@ -1,10 +1,10 @@
 use byteorder::BigEndian as E;
 use byteorder::WriteBytesExt;
+use clap::Parser;
+use clap::ValueEnum;
 use ctap_hid_fido2::Cfg;
 use ctap_hid_fido2::FidoKeyHidFactory;
-use ed25519_dalek::{Signature, Signer, SigningKey};
 use pem::Pem;
-use rand::rngs::OsRng;
 use sha2::Digest;
 use sha2::Sha256;
 use sha2::Sha512;
@@ -127,10 +127,9 @@ fn encode_signature(r#type: &str, signature: &[u8], flags: u8, counter: u32) -> 
     buf
 }
 
-fn sign(message: &[u8]) {
+fn sign(message: &[u8], namespace: &str) {
     const TYPE: &str = "sk-ssh-ed25519@openssh.com";
     const HASH_ALGO: &str = "sha512";
-    const NAMESPACE: &str = "git";
     const APPLICATION: &str = "ssh:signing";
     const PIN: Option<&str> = None;
 
@@ -142,7 +141,7 @@ fn sign(message: &[u8]) {
     let assertion = &device
         .get_assertions_rk(
             APPLICATION,
-            &encode_signed_data(NAMESPACE, HASH_ALGO, &Sha512::digest(message)),
+            &encode_signed_data(namespace, HASH_ALGO, &Sha512::digest(message)),
             PIN,
         )
         .unwrap()[0];
@@ -153,7 +152,7 @@ fn sign(message: &[u8]) {
 
     let signature = encode_signature_blob(
         &encode_publickey(TYPE, &cred.public_key.der, APPLICATION),
-        NAMESPACE,
+        namespace,
         HASH_ALGO,
         &encode_signature(
             TYPE,
@@ -173,6 +172,34 @@ fn sign(message: &[u8]) {
     );
 }
 
+/// OpenSSH authentication key utility
+#[derive(Parser, Debug)]
+#[command(author, version, about, long_about = None)]
+struct Args {
+    /// signature-related options
+    #[arg(short = 'Y', value_name = "OPERATION")]
+    mode: Mode,
+
+    /// signature namespace, used to prevent signature confusion across different domains of use
+    #[arg(short = 'n')]
+    namespace: String,
+
+    #[arg(short = 'f', value_name = "KEY_FILE")]
+    key_file: Option<String>,
+
+    file: String,
+}
+
+#[derive(Copy, Clone, PartialEq, Eq, PartialOrd, Ord, ValueEnum, Debug)]
+enum Mode {
+    /// cryptographically sign a file or some data using an SSH key
+    Sign,
+}
+
 fn main() {
-    sign(b"hello");
+    let args = Args::parse();
+
+    let data = std::fs::read(args.file).unwrap();
+
+    sign(&data, &args.namespace);
 }
