@@ -127,7 +127,7 @@ fn encode_signature(r#type: &str, signature: &[u8], flags: u8, counter: u32) -> 
     buf
 }
 
-fn sign(message: &[u8], namespace: &str) {
+fn sign(message: &[u8], namespace: &str) -> String {
     const TYPE: &str = "sk-ssh-ed25519@openssh.com";
     const HASH_ALGO: &str = "sha512";
     const APPLICATION: &str = "ssh:signing";
@@ -166,10 +166,7 @@ fn sign(message: &[u8], namespace: &str) {
     let config = config.set_line_ending(pem::LineEnding::LF);
     let config = config.set_line_wrap(76);
 
-    print!(
-        "{}",
-        pem::encode_config(&Pem::new("SSH SIGNATURE", signature), config)
-    );
+    pem::encode_config(&Pem::new("SSH SIGNATURE", signature), config)
 }
 
 /// OpenSSH authentication key utility
@@ -199,7 +196,9 @@ enum Mode {
 fn main() {
     let args = Args::parse();
 
-    let data = std::fs::read(args.file).unwrap();
+    let data = std::fs::read(&args.file).unwrap();
 
-    sign(&data, &args.namespace);
+    let sig = sign(&data, &args.namespace);
+
+    std::fs::write(args.file + ".sig", sig.as_bytes()).unwrap();
 }
