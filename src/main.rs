@@ -2,6 +2,7 @@ use byteorder::BigEndian as E;
 use byteorder::WriteBytesExt;
 use clap::Parser;
 use clap::ValueEnum;
+use ctap_hid_fido2::public_key::PublicKeyType;
 use ctap_hid_fido2::Cfg;
 use ctap_hid_fido2::FidoKeyHidFactory;
 use pem::Pem;
@@ -103,7 +104,6 @@ fn encode_signature(r#type: &str, signature: &[u8], flags: u8, counter: u32) -> 
 }
 
 fn sign(message: &[u8], namespace: &str, rp_id: &str) -> String {
-    const TYPE: &str = "sk-ssh-ed25519@openssh.com";
     const HASH_ALGO: &str = "sha512";
     const PIN: Option<&str> = None;
 
@@ -124,12 +124,17 @@ fn sign(message: &[u8], namespace: &str, rp_id: &str) -> String {
         .credential_management_enumerate_credentials(PIN, &assertion.rpid_hash)
         .unwrap()[0];
 
+    let key_type = match cred.public_key.key_type {
+        PublicKeyType::Ed25519 => "sk-ssh-ed25519@openssh.com",
+        _ => unimplemented!(),
+    };
+
     let signature = encode_signature_blob(
-        &encode_publickey(TYPE, &cred.public_key.der, rp_id),
+        &encode_publickey(key_type, &cred.public_key.der, rp_id),
         namespace,
         HASH_ALGO,
         &encode_signature(
-            TYPE,
+            key_type,
             &assertion.signature,
             assertion.flags.as_u8(),
             assertion.sign_count,
@@ -171,9 +176,11 @@ enum Mode {
 fn main() {
     let args = Args::parse();
 
-    let data = std::fs::read(&args.file).unwrap();
-
-    let sig = sign(&data, &args.namespace, &args.key_file);
-
-    std::fs::write(args.file + ".sig", sig.as_bytes()).unwrap();
+    match args.mode {
+        Mode::Sign => {
+            let data = std::fs::read(&args.file).unwrap();
+            let sig = sign(&data, &args.namespace, &args.key_file);
+            std::fs::write(args.file + ".sig", sig.as_bytes()).unwrap();
+        }
+    }
 }
