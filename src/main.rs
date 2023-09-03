@@ -127,10 +127,9 @@ fn encode_signature(r#type: &str, signature: &[u8], flags: u8, counter: u32) -> 
     buf
 }
 
-fn sign(message: &[u8], namespace: &str) -> String {
+fn sign(message: &[u8], namespace: &str, rp_id: &str) -> String {
     const TYPE: &str = "sk-ssh-ed25519@openssh.com";
     const HASH_ALGO: &str = "sha512";
-    const APPLICATION: &str = "ssh:signing";
     const PIN: Option<&str> = None;
 
     let mut config = Cfg::init();
@@ -140,7 +139,7 @@ fn sign(message: &[u8], namespace: &str) -> String {
 
     let assertion = &device
         .get_assertions_rk(
-            APPLICATION,
+            rp_id,
             &encode_signed_data(namespace, HASH_ALGO, &Sha512::digest(message)),
             PIN,
         )
@@ -151,7 +150,7 @@ fn sign(message: &[u8], namespace: &str) -> String {
         .unwrap()[0];
 
     let signature = encode_signature_blob(
-        &encode_publickey(TYPE, &cred.public_key.der, APPLICATION),
+        &encode_publickey(TYPE, &cred.public_key.der, rp_id),
         namespace,
         HASH_ALGO,
         &encode_signature(
@@ -181,8 +180,9 @@ struct Args {
     #[arg(short = 'n')]
     namespace: String,
 
+    /// path to private key file, actually interpreted as relying party id
     #[arg(short = 'f', value_name = "KEY_FILE")]
-    key_file: Option<String>,
+    key_file: String,
 
     file: String,
 }
@@ -198,7 +198,7 @@ fn main() {
 
     let data = std::fs::read(&args.file).unwrap();
 
-    let sig = sign(&data, &args.namespace);
+    let sig = sign(&data, &args.namespace, &args.key_file);
 
     std::fs::write(args.file + ".sig", sig.as_bytes()).unwrap();
 }
