@@ -6,7 +6,6 @@ use ctap_hid_fido2::Cfg;
 use ctap_hid_fido2::FidoKeyHidFactory;
 use pem::Pem;
 use sha2::Digest;
-use sha2::Sha256;
 use sha2::Sha512;
 use std::io::Write;
 
@@ -63,30 +62,6 @@ fn encode_signature_blob(
     buf.write_string(hash_algorithm.as_bytes()).unwrap();
     // string    signature
     buf.write_string(&signature).unwrap();
-    buf
-}
-
-fn encode_wrapped_signed_data(
-    application: &str,
-    flags: u8,
-    counter: u32,
-    message: &[u8],
-) -> Vec<u8> {
-    // Reference: https://github.com/openssh/openssh-portable/blob/master/PROTOCOL.u2f
-    // In addition to the message to be signed, the U2F signature operation
-    // requires the key handle and a few additional parameters. The signature
-    // is signed over a blob that consists of:
-    let mut buf = vec![];
-    // byte[32]	SHA256(application)
-    buf.write_all(&Sha256::digest(application.as_bytes()))
-        .unwrap();
-    // byte		flags (including "user present", extensions present)
-    buf.write_u8(flags).unwrap();
-    // uint32	counter
-    buf.write_u32::<E>(counter).unwrap();
-    // byte[]	extensions
-    // byte[32]	SHA256(message)
-    buf.write_all(&Sha256::digest(message)).unwrap();
     buf
 }
 
