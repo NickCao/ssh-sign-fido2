@@ -6,6 +6,9 @@ use ctap_hid_fido2::public_key::PublicKeyType;
 use ctap_hid_fido2::Cfg;
 use ctap_hid_fido2::FidoKeyHidFactory;
 use pem::Pem;
+use secrecy::ExposeSecret;
+use secrecy::Secret;
+use secrecy::SecretString;
 use sha2::Digest;
 use sha2::Sha512;
 use std::io::Write;
@@ -105,7 +108,19 @@ fn encode_signature(r#type: &str, signature: &[u8], flags: u8, counter: u32) -> 
 
 fn sign(message: &[u8], namespace: &str, rp_id: &str) -> String {
     const HASH_ALGO: &str = "sha512";
-    const PIN: Option<&str> = None;
+
+    let pin = if let Some(mut input) = pinentry::PassphraseInput::with_default_binary() {
+        Some(
+            input
+                .with_prompt("Enter FIDO2 Pin:")
+                .interact()
+                .unwrap()
+                .expose_secret()
+                .to_owned(),
+        )
+    } else {
+        None
+    };
 
     let mut config = Cfg::init();
     config.keep_alive_msg = "".to_string();
@@ -116,12 +131,12 @@ fn sign(message: &[u8], namespace: &str, rp_id: &str) -> String {
         .get_assertions_rk(
             rp_id,
             &encode_signed_data(namespace, HASH_ALGO, &Sha512::digest(message)),
-            PIN,
+            pin.as_deref(),
         )
         .unwrap()[0];
 
     let cred = &device
-        .credential_management_enumerate_credentials(PIN, &assertion.rpid_hash)
+        .credential_management_enumerate_credentials(pin.as_deref(), &assertion.rpid_hash)
         .unwrap()[0];
 
     let key_type = match cred.public_key.key_type {
