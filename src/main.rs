@@ -137,8 +137,6 @@ fn sign(message: &[u8], namespace: &str, rp_id: &str) -> String {
         AuthenticatorService::new().expect("The auth service should initialize safely");
     manager.add_u2f_usb_hid_platform_transports();
 
-    let pin2 = pin.clone();
-
     let (status_tx, status_rx) = channel::<StatusUpdate>();
     let (pub_tx, pub_rx) = channel::<CredentialList>();
     thread::spawn(move || loop {
@@ -147,10 +145,12 @@ fn sign(message: &[u8], namespace: &str, rp_id: &str) -> String {
                 sender,
                 _,
             )))) => {
-                sender.send(authenticator::InteractiveRequest::CredentialManagement(
-                    authenticator::CredManagementCmd::GetCredentials,
-                    None,
-                ));
+                sender
+                    .send(authenticator::InteractiveRequest::CredentialManagement(
+                        authenticator::CredManagementCmd::GetCredentials,
+                        None,
+                    ))
+                    .unwrap();
                 continue;
             }
             Ok(StatusUpdate::InteractiveManagement(
@@ -159,7 +159,7 @@ fn sign(message: &[u8], namespace: &str, rp_id: &str) -> String {
                     _,
                 )),
             )) => {
-                pub_tx.send(creds);
+                pub_tx.send(creds).unwrap();
                 continue;
             }
             Ok(StatusUpdate::InteractiveManagement(up)) => {
@@ -174,13 +174,13 @@ fn sign(message: &[u8], namespace: &str, rp_id: &str) -> String {
             }
             Ok(StatusUpdate::PinUvError(StatusPinUv::PinRequired(sender))) => {
                 sender
-                    .send(Pin::new(&pin2.clone().unwrap()))
+                    .send(Pin::new(&pin.clone().unwrap()))
                     .expect("Failed to send PIN");
                 continue;
             }
             Ok(StatusUpdate::PinUvError(StatusPinUv::InvalidPin(sender, _attempts))) => {
                 sender
-                    .send(Pin::new(&pin2.clone().unwrap()))
+                    .send(Pin::new(&pin.clone().unwrap()))
                     .expect("Failed to send PIN");
                 continue;
             }
