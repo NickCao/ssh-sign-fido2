@@ -1,8 +1,9 @@
 use authenticator::authenticatorservice::AuthenticatorService;
 use authenticator::authenticatorservice::SignArgs;
-use authenticator::crypto::COSEKey;
+
 use authenticator::crypto::COSEKeyType;
 
+use authenticator::ctap2::commands::credential_management::CredentialList;
 use authenticator::ctap2::server::AuthenticationExtensionsClientInputs;
 use authenticator::ctap2::server::UserVerificationRequirement;
 use authenticator::statecallback::StateCallback;
@@ -15,8 +16,6 @@ use byteorder::BigEndian as E;
 use byteorder::WriteBytesExt;
 use clap::Parser;
 use clap::ValueEnum;
-
-
 
 use pem::Pem;
 use secrecy::ExposeSecret;
@@ -123,12 +122,14 @@ fn encode_signature(r#type: &str, signature: &[u8], flags: u8, counter: u32) -> 
 fn sign(message: &[u8], namespace: &str, rp_id: &str) -> String {
     const HASH_ALGO: &str = "sha512";
 
-    let pin = pinentry::PassphraseInput::with_default_binary().map(|mut input| input
-                .with_prompt("Enter FIDO2 Pin:")
-                .interact()
-                .unwrap()
-                .expose_secret()
-                .to_owned());
+    let pin = pinentry::PassphraseInput::with_default_binary().map(|mut input| {
+        input
+            .with_prompt("Enter FIDO2 Pin:")
+            .interact()
+            .unwrap()
+            .expose_secret()
+            .to_owned()
+    });
 
     let mut manager =
         AuthenticatorService::new().expect("The auth service should initialize safely");
@@ -137,10 +138,31 @@ fn sign(message: &[u8], namespace: &str, rp_id: &str) -> String {
     let pin2 = pin.clone();
 
     let (status_tx, status_rx) = channel::<StatusUpdate>();
+    let (pub_tx, pub_rx) = channel::<CredentialList>();
     thread::spawn(move || loop {
         match status_rx.recv() {
-            Ok(StatusUpdate::InteractiveManagement(..)) => {
-                panic!("STATUS: This can't happen when doing non-interactive usage");
+            Ok(StatusUpdate::InteractiveManagement(InteractiveUpdate::StartManagement((
+                sender,
+                _,
+            )))) => {
+                sender.send(authenticator::InteractiveRequest::CredentialManagement(
+                    authenticator::CredManagementCmd::GetCredentials,
+                    None,
+                ));
+                continue;
+            }
+            Ok(StatusUpdate::InteractiveManagement(
+                InteractiveUpdate::CredentialManagementUpdate((
+                    CredentialManagementResult::CredentialList(creds),
+                    _,
+                )),
+            )) => {
+                pub_tx.send(creds);
+                continue;
+            }
+            Ok(StatusUpdate::InteractiveManagement(up)) => {
+                dbg!(up);
+                continue;
             }
             Ok(StatusUpdate::SelectDeviceNotice) => {
                 println!("STATUS: Please select a device by touching one of them.");
@@ -221,7 +243,7 @@ fn sign(message: &[u8], namespace: &str, rp_id: &str) -> String {
             sign_tx.send(rv).unwrap();
         }));
 
-        if let Err(e) = manager.sign(0, ctap_args, status_tx, callback) {
+        if let Err(e) = manager.sign(0, ctap_args, status_tx.clone(), callback) {
             panic!("Couldn't sign: {:?}", e);
         }
 
@@ -236,97 +258,13 @@ fn sign(message: &[u8], namespace: &str, rp_id: &str) -> String {
 
         let keyid = assertion.assertion.credentials.unwrap().id;
 
-        let (status_tx_2, status_rx_2) = channel::<StatusUpdate>();
-        let (pub_tx, pub_rx) = channel::<COSEKey>();
-        thread::spawn(move || loop {
-            match status_rx_2.recv() {
-                Ok(StatusUpdate::InteractiveManagement(InteractiveUpdate::StartManagement((
-                    sender,
-                    _,
-                )))) => {
-                    sender.send(authenticator::InteractiveRequest::CredentialManagement(
-                        authenticator::CredManagementCmd::GetCredentials,
-                        None,
-                    ));
-                    continue;
-                }
-                Ok(StatusUpdate::InteractiveManagement(
-                    InteractiveUpdate::CredentialManagementUpdate((
-                        CredentialManagementResult::CredentialList(creds),
-                        _,
-                    )),
-                )) => {
-                    let cred = creds
-                        .credential_list
-                        .into_iter()
-                        .flat_map(|rp| rp.credentials)
-                        .find(|cred| cred.credential_id.id == keyid)
-                        .unwrap();
-                    pub_tx.send(cred.public_key);
-                    continue;
-                }
-                Ok(StatusUpdate::InteractiveManagement(up)) => {
-                    dbg!(up);
-                    continue;
-                }
-                Ok(StatusUpdate::SelectDeviceNotice) => {
-                    println!("STATUS: Please select a device by touching one of them.");
-                }
-                Ok(StatusUpdate::PresenceRequired) => {
-                    println!("STATUS: waiting for user presence");
-                }
-                Ok(StatusUpdate::PinUvError(StatusPinUv::PinRequired(sender))) => {
-                    sender
-                        .send(Pin::new(&pin.clone().unwrap()))
-                        .expect("Failed to send PIN");
-                    continue;
-                }
-                Ok(StatusUpdate::PinUvError(StatusPinUv::InvalidPin(sender, _attempts))) => {
-                    sender
-                        .send(Pin::new(&pin.clone().unwrap()))
-                        .expect("Failed to send PIN");
-                    continue;
-                }
-                Ok(StatusUpdate::PinUvError(StatusPinUv::PinAuthBlocked)) => {
-                    panic!("Too many failed attempts in one row. Your device has been temporarily blocked. Please unplug it and plug in again.")
-                }
-                Ok(StatusUpdate::PinUvError(StatusPinUv::PinBlocked)) => {
-                    panic!("Too many failed attempts. Your device has been blocked. Reset it.")
-                }
-                Ok(StatusUpdate::PinUvError(StatusPinUv::InvalidUv(attempts))) => {
-                    println!(
-                        "Wrong UV! {}",
-                        attempts.map_or("Try again.".to_string(), |a| format!(
-                            "You have {a} attempts left."
-                        ))
-                    );
-                    continue;
-                }
-                Ok(StatusUpdate::PinUvError(StatusPinUv::UvBlocked)) => {
-                    println!("Too many failed UV-attempts.");
-                    continue;
-                }
-                Ok(StatusUpdate::PinUvError(e)) => {
-                    panic!("Unexpected error: {:?}", e)
-                }
-                Ok(StatusUpdate::SelectResultNotice(index_sender, _users)) => {
-                    println!("Multiple signatures returned. Select one or cancel.");
-                    index_sender.send(None).expect("Failed to send choice");
-                }
-                Err(_RecvError) => {
-                    println!("STATUS: end");
-                    return;
-                }
-            }
-        });
-
         let (mgmt_tx, mgmt_rx) = channel();
 
         let callback_2 = StateCallback::new(Box::new(move |rv| {
             mgmt_tx.send(rv).unwrap();
         }));
 
-        if let Err(e) = manager.manage(0, status_tx_2, callback_2) {
+        if let Err(e) = manager.manage(0, status_tx, callback_2) {
             panic!("Couldn't manage: {:?}", e);
         }
 
@@ -334,7 +272,15 @@ fn sign(message: &[u8], namespace: &str, rp_id: &str) -> String {
             .recv()
             .expect("Problem receiving, unable to continue");
 
-        let pubkey = pub_rx.recv().unwrap();
+        let pubkey = pub_rx
+            .recv()
+            .unwrap()
+            .credential_list
+            .into_iter()
+            .flat_map(|rp| rp.credentials)
+            .find(|cred| cred.credential_id.id == keyid)
+            .unwrap()
+            .public_key;
 
         /*
         let key_type = match cred.public_key.key_type {
