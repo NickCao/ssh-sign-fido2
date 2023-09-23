@@ -8,7 +8,7 @@ use authenticator::crypto::COSEKeyType;
 use authenticator::crypto::COSEOKPKey;
 use authenticator::crypto::Curve;
 use authenticator::ctap2::commands::credential_management::CredentialList;
-use authenticator::ctap2::server::AuthenticationExtensionsClientInputs;
+
 use authenticator::ctap2::server::UserVerificationRequirement;
 use authenticator::statecallback::StateCallback;
 use authenticator::CredentialManagementResult;
@@ -219,23 +219,19 @@ fn sign(message: &[u8], namespace: &str, rp_id: &str) -> String {
         }
     });
 
-    let mut challenge = Sha256::new();
-    challenge.update(encode_signed_data(
-        namespace,
-        HASH_ALGO,
-        &Sha512::digest(message),
-    ));
-    let chall_bytes = challenge.finalize().into();
     let ctap_args = SignArgs {
-        client_data_hash: chall_bytes,
+        client_data_hash: Sha256::digest(encode_signed_data(
+            namespace,
+            HASH_ALGO,
+            &Sha512::digest(message),
+        ))
+        .into(),
         origin: rp_id.to_string(),
         relying_party_id: rp_id.to_string(),
         allow_list: vec![],
         user_verification_req: UserVerificationRequirement::Required,
         user_presence_req: true,
-        extensions: AuthenticationExtensionsClientInputs {
-            ..Default::default()
-        },
+        extensions: Default::default(),
         pin: None,
         use_ctap1_fallback: false,
     };
