@@ -121,7 +121,7 @@ fn encode_signature(r#type: &str, signature: &[u8], flags: u8, counter: u32) -> 
 }
 
 fn sign(message: &[u8], namespace: &str, rp_id: &str) -> String {
-    const HASH_ALGO: &str = "sha256";
+    const HASH_ALGO: &str = "sha512";
 
     let pin = if let Some(mut input) = pinentry::PassphraseInput::with_default_binary() {
         Some(
@@ -200,7 +200,11 @@ fn sign(message: &[u8], namespace: &str, rp_id: &str) -> String {
     });
 
     let mut challenge = Sha256::new();
-    challenge.update(message);
+    challenge.update(encode_signed_data(
+        namespace,
+        HASH_ALGO,
+        &Sha512::digest(message),
+    ));
     let chall_bytes = challenge.finalize().into();
     let ctap_args = SignArgs {
         client_data_hash: chall_bytes,
