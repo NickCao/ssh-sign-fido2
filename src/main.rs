@@ -1,34 +1,17 @@
-use authenticator::authenticatorservice::AuthenticatorService;
-use authenticator::authenticatorservice::SignArgs;
-use authenticator::CredManagementCmd;
-use authenticator::InteractiveRequest;
-
-use authenticator::crypto::COSEKeyType;
-
-use authenticator::crypto::COSEOKPKey;
-use authenticator::crypto::Curve;
-use authenticator::ctap2::commands::credential_management::CredentialList;
-
-use authenticator::ctap2::server::UserVerificationRequirement;
-use authenticator::statecallback::StateCallback;
-use authenticator::CredentialManagementResult;
-use authenticator::InteractiveUpdate;
-use authenticator::Pin;
-use authenticator::StatusPinUv;
-use authenticator::StatusUpdate;
-use byteorder::BigEndian as E;
-use byteorder::WriteBytesExt;
-use clap::Parser;
-use clap::ValueEnum;
-
+use authenticator::{
+    authenticatorservice::{AuthenticatorService, SignArgs},
+    crypto::{COSEKeyType, COSEOKPKey, Curve},
+    ctap2::{commands::credential_management::CredentialList, server::UserVerificationRequirement},
+    statecallback::StateCallback,
+    CredManagementCmd, CredentialManagementResult, InteractiveRequest, InteractiveUpdate, Pin,
+    StatusPinUv, StatusUpdate,
+};
+use byteorder::{BigEndian as E, WriteBytesExt};
+use clap::{Parser, ValueEnum};
 use pem::Pem;
 use secrecy::ExposeSecret;
-use sha2::Digest;
-use sha2::Sha256;
-use sha2::Sha512;
-use std::io::Write;
-use std::sync::mpsc::channel;
-use std::thread;
+use sha2::{Digest, Sha256, Sha512};
+use std::{io::Write, sync::mpsc::channel};
 
 const MAGIC_PREAMBLE: &[u8] = b"SSHSIG";
 const SIG_VERSION: u32 = 0x01;
@@ -126,97 +109,68 @@ fn encode_signature(r#type: &str, signature: &[u8], flags: u8, counter: u32) -> 
 fn sign(message: &[u8], namespace: &str, rp_id: &str) -> String {
     const HASH_ALGO: &str = "sha512";
 
-    let pin = pinentry::PassphraseInput::with_default_binary().map(|mut input| {
-        input
-            .with_prompt("Enter FIDO2 Pin:")
-            .interact()
-            .unwrap()
-            .expose_secret()
-            .to_owned()
-    });
-
     let mut manager = AuthenticatorService::new().unwrap();
 
     manager.add_detected_transports();
 
-    let (status_tx, status_rx) = channel::<StatusUpdate>();
     let (pub_tx, pub_rx) = channel::<CredentialList>();
-    thread::spawn(move || loop {
-        match status_rx.recv() {
-            Ok(StatusUpdate::InteractiveManagement(InteractiveUpdate::StartManagement((
-                sender,
-                _,
-            )))) => {
-                sender
-                    .send(InteractiveRequest::CredentialManagement(
-                        CredManagementCmd::GetCredentials,
-                        None,
-                    ))
-                    .unwrap();
-                continue;
-            }
-            Ok(StatusUpdate::InteractiveManagement(
-                InteractiveUpdate::CredentialManagementUpdate((
-                    CredentialManagementResult::CredentialList(creds),
-                    _,
-                )),
-            )) => {
-                pub_tx.send(creds).unwrap();
-                continue;
-            }
-            Ok(StatusUpdate::InteractiveManagement(up)) => {
-                dbg!(up);
-                continue;
-            }
-            Ok(StatusUpdate::SelectDeviceNotice) => {
-                println!("STATUS: Please select a device by touching one of them.");
-            }
-            Ok(StatusUpdate::PresenceRequired) => {
-                println!("STATUS: waiting for user presence");
-            }
-            Ok(StatusUpdate::PinUvError(StatusPinUv::PinRequired(sender))) => {
-                sender
-                    .send(Pin::new(&pin.clone().unwrap()))
-                    .expect("Failed to send PIN");
-                continue;
-            }
-            Ok(StatusUpdate::PinUvError(StatusPinUv::InvalidPin(sender, _attempts))) => {
-                sender
-                    .send(Pin::new(&pin.clone().unwrap()))
-                    .expect("Failed to send PIN");
-                continue;
-            }
-            Ok(StatusUpdate::PinUvError(StatusPinUv::InvalidUv(attempts))) => {
-                println!(
-                    "Wrong UV! {}",
-                    attempts.map_or("Try again.".to_string(), |a| format!(
-                        "You have {a} attempts left."
-                    ))
-                );
-                continue;
-            }
-            Ok(StatusUpdate::PinUvError(StatusPinUv::PinAuthBlocked)) => {
-                panic!("Too many failed attempts in one row. Your device has been temporarily blocked. Please unplug it and plug in again.")
-            }
-            Ok(StatusUpdate::PinUvError(StatusPinUv::PinBlocked)) => {
-                panic!("Too many failed attempts. Your device has been blocked. Reset it.")
-            }
-            Ok(StatusUpdate::PinUvError(StatusPinUv::UvBlocked)) => {
-                println!("Too many failed UV-attempts.");
-                continue;
-            }
-            Ok(StatusUpdate::PinUvError(e)) => {
-                panic!("Unexpected error: {:?}", e)
-            }
-            Ok(StatusUpdate::SelectResultNotice(index_sender, _users)) => {
-                println!("Multiple signatures returned. Select one or cancel.");
-                index_sender.send(None).expect("Failed to send choice");
-            }
-            Err(_) => {
-                println!("STATUS: end");
-                return;
+
+    let (tx, rx) = channel::<StatusUpdate>();
+
+    std::thread::spawn(move || -> anyhow::Result<()> {
+        for update in rx.iter() {
+            match update {
+                StatusUpdate::InteractiveManagement(management) => match management {
+                    InteractiveUpdate::StartManagement((sender, _)) => {
+                        let request = InteractiveRequest::CredentialManagement(
+                            CredManagementCmd::GetCredentials,
+                            None,
+                        );
+                        sender.send(request)?;
+                        sender.send(InteractiveRequest::Quit)?;
+                    }
+                    InteractiveUpdate::CredentialManagementUpdate((
+                        CredentialManagementResult::CredentialList(creds),
+                        _,
+                    )) => {
+                        pub_tx.send(creds)?;
+                    }
+                    _ => unreachable!(),
+                },
+                StatusUpdate::SelectDeviceNotice => println!("select device by touching"),
+                StatusUpdate::PresenceRequired => eprintln!("waiting for user presence"),
+                StatusUpdate::PinUvError(StatusPinUv::PinRequired(sender)) => {
+                    let pin = pinentry::PassphraseInput::with_default_binary().map(|mut input| {
+                        input
+                            .with_prompt("Enter FIDO2 Pin:")
+                            .interact()
+                            .unwrap()
+                            .expose_secret()
+                            .to_owned()
+                    });
+                    sender.send(Pin::new(&pin.unwrap())).unwrap();
+                }
+                StatusUpdate::PinUvError(StatusPinUv::InvalidPin(sender, _attempts)) => {
+                    let pin = pinentry::PassphraseInput::with_default_binary().map(|mut input| {
+                        input
+                            .with_prompt("Enter FIDO2 Pin:")
+                            .interact()
+                            .unwrap()
+                            .expose_secret()
+                            .to_owned()
+                    });
+                    sender.send(Pin::new(&pin.unwrap())).unwrap();
+                }
+                StatusUpdate::PinUvError(err) => {
+                    eprintln!("user verification error: {:?}", err)
+                }
+                StatusUpdate::SelectResultNotice(index_sender, _users) => {
+                    println!("Multiple signatures returned. Select one or cancel.");
+                    index_sender.send(None).expect("Failed to send choice");
+                }
             }
         }
+        Ok(())
     });
 
     let ctap_args = SignArgs {
@@ -242,7 +196,7 @@ fn sign(message: &[u8], namespace: &str, rp_id: &str) -> String {
         sign_tx.send(rv).unwrap();
     }));
 
-    if let Err(e) = manager.sign(0, ctap_args, status_tx.clone(), callback) {
+    if let Err(e) = manager.sign(0, ctap_args, tx.clone(), callback) {
         panic!("Couldn't sign: {:?}", e);
     }
 
@@ -256,13 +210,13 @@ fn sign(message: &[u8], namespace: &str, rp_id: &str) -> String {
         mgmt_tx.send(rv).unwrap();
     }));
 
-    if let Err(e) = manager.manage(0, status_tx, callback_2) {
+    if let Err(e) = manager.manage(0, tx, callback_2) {
         panic!("Couldn't manage: {:?}", e);
     }
 
-    let _mgmt_result = mgmt_rx
-        .recv()
-        .expect("Problem receiving, unable to continue");
+    for result in mgmt_rx.iter() {
+        result.unwrap();
+    }
 
     let pubkey = pub_rx
         .recv()

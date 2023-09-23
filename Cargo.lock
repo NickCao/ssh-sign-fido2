@@ -51,6 +51,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "anyhow"
+version = "1.0.75"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a4668cab20f66d8d020e1fbc0ebe47217433c1b6c8f2040faf858554e394ace6"
+
+[[package]]
 name = "authenticator"
 version = "0.4.0-alpha.22"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -306,12 +312,6 @@ name = "heck"
 version = "0.4.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "95505c38b4572b2d910cecb0281560f54b440a19336cbbcb27bf6ce6adc6f5a8"
-
-[[package]]
-name = "hex"
-version = "0.4.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7f24254aa9a54b5c858eaee2f5bccdb46aaf0e486a595ed5fd8f86ba55232a70"
 
 [[package]]
 name = "home"
@@ -630,15 +630,13 @@ dependencies = [
 name = "ssh-sign-fido2"
 version = "0.1.0"
 dependencies = [
+ "anyhow",
  "authenticator",
- "base64",
  "byteorder",
  "clap",
- "hex",
- "nom",
+ "log",
  "pem",
  "pinentry",
- "rand",
  "secrecy",
  "sha2",
 ]
