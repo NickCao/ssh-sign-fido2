@@ -135,9 +135,9 @@ fn sign(message: &[u8], namespace: &str, rp_id: &str) -> String {
             .to_owned()
     });
 
-    let mut manager =
-        AuthenticatorService::new().expect("The auth service should initialize safely");
-    manager.add_u2f_usb_hid_platform_transports();
+    let mut manager = AuthenticatorService::new().unwrap();
+
+    manager.add_detected_transports();
 
     let (status_tx, status_rx) = channel::<StatusUpdate>();
     let (pub_tx, pub_rx) = channel::<CredentialList>();
