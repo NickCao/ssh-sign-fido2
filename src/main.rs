@@ -250,16 +250,9 @@ fn sign(message: &[u8], namespace: &str, rp_id: &str) -> String {
         panic!("Couldn't sign: {:?}", e);
     }
 
-    let sign_result = sign_rx
-        .recv()
-        .expect("Problem receiving, unable to continue");
+    let assertion = sign_rx.recv().unwrap().unwrap().assertion;
 
-    let assertion = match sign_result {
-        Ok(assertion_object) => assertion_object,
-        Err(e) => panic!("Signing failed: {:?}", e),
-    };
-
-    let keyid = assertion.assertion.credentials.unwrap().id;
+    let keyid = assertion.credentials.unwrap().id;
 
     let (mgmt_tx, mgmt_rx) = channel();
 
@@ -299,9 +292,9 @@ fn sign(message: &[u8], namespace: &str, rp_id: &str) -> String {
         HASH_ALGO,
         &encode_signature(
             key_type,
-            &assertion.assertion.signature,
-            assertion.assertion.auth_data.flags.bits(),
-            assertion.assertion.auth_data.counter,
+            &assertion.signature,
+            assertion.auth_data.flags.bits(),
+            assertion.auth_data.counter,
         ),
     );
 
