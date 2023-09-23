@@ -3,6 +3,8 @@ use authenticator::authenticatorservice::SignArgs;
 
 use authenticator::crypto::COSEKeyType;
 
+use authenticator::crypto::COSEOKPKey;
+use authenticator::crypto::Curve;
 use authenticator::ctap2::commands::credential_management::CredentialList;
 use authenticator::ctap2::server::AuthenticationExtensionsClientInputs;
 use authenticator::ctap2::server::UserVerificationRequirement;
@@ -282,35 +284,31 @@ fn sign(message: &[u8], namespace: &str, rp_id: &str) -> String {
             .unwrap()
             .public_key;
 
-        /*
-        let key_type = match cred.public_key.key_type {
-            PublicKeyType::Ed25519 => "sk-ssh-ed25519@openssh.com",
+        let (key_type, key) = match pubkey.key {
+            COSEKeyType::OKP(COSEOKPKey {
+                curve: Curve::Ed25519,
+                x,
+            }) => ("sk-ssh-ed25519@openssh.com", x),
             _ => unimplemented!(),
         };
-        */
-        if let COSEKeyType::OKP(key) = pubkey.key {
-            let key_type = "sk-ssh-ed25519@openssh.com";
 
-            let signature = encode_signature_blob(
-                &encode_publickey(key_type, &key.x, rp_id),
-                namespace,
-                HASH_ALGO,
-                &encode_signature(
-                    key_type,
-                    &assertion.assertion.signature,
-                    assertion.assertion.auth_data.flags.bits(),
-                    assertion.assertion.auth_data.counter,
-                ),
-            );
+        let signature = encode_signature_blob(
+            &encode_publickey(key_type, &key, rp_id),
+            namespace,
+            HASH_ALGO,
+            &encode_signature(
+                key_type,
+                &assertion.assertion.signature,
+                assertion.assertion.auth_data.flags.bits(),
+                assertion.assertion.auth_data.counter,
+            ),
+        );
 
-            let config = pem::EncodeConfig::new();
-            let config = config.set_line_ending(pem::LineEnding::LF);
-            let config = config.set_line_wrap(76);
+        let config = pem::EncodeConfig::new();
+        let config = config.set_line_ending(pem::LineEnding::LF);
+        let config = config.set_line_wrap(76);
 
-            return pem::encode_config(&Pem::new("SSH SIGNATURE", signature), config);
-        } else {
-            unreachable!();
-        }
+        return pem::encode_config(&Pem::new("SSH SIGNATURE", signature), config);
     }
 }
 
