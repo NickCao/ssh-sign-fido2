@@ -1,8 +1,13 @@
 use authenticator::authenticatorservice::AuthenticatorService;
 use authenticator::authenticatorservice::SignArgs;
+use authenticator::crypto::COSEKey;
+use authenticator::crypto::COSEKeyType;
+use authenticator::ctap2::commands::credential_management::CredentialManagement;
 use authenticator::ctap2::server::AuthenticationExtensionsClientInputs;
 use authenticator::ctap2::server::UserVerificationRequirement;
 use authenticator::statecallback::StateCallback;
+use authenticator::CredentialManagementResult;
+use authenticator::InteractiveUpdate;
 use authenticator::Pin;
 use authenticator::StatusPinUv;
 use authenticator::StatusUpdate;
@@ -116,7 +121,7 @@ fn encode_signature(r#type: &str, signature: &[u8], flags: u8, counter: u32) -> 
 }
 
 fn sign(message: &[u8], namespace: &str, rp_id: &str) -> String {
-    const HASH_ALGO: &str = "sha512";
+    const HASH_ALGO: &str = "sha256";
 
     let pin = if let Some(mut input) = pinentry::PassphraseInput::with_default_binary() {
         Some(
@@ -135,6 +140,8 @@ fn sign(message: &[u8], namespace: &str, rp_id: &str) -> String {
         AuthenticatorService::new().expect("The auth service should initialize safely");
     manager.add_u2f_usb_hid_platform_transports();
 
+    let pin2 = pin.clone();
+
     let (status_tx, status_rx) = channel::<StatusUpdate>();
     thread::spawn(move || loop {
         match status_rx.recv() {
@@ -149,13 +156,13 @@ fn sign(message: &[u8], namespace: &str, rp_id: &str) -> String {
             }
             Ok(StatusUpdate::PinUvError(StatusPinUv::PinRequired(sender))) => {
                 sender
-                    .send(Pin::new(&pin.clone().unwrap()))
+                    .send(Pin::new(&pin2.clone().unwrap()))
                     .expect("Failed to send PIN");
                 continue;
             }
             Ok(StatusUpdate::PinUvError(StatusPinUv::InvalidPin(sender, attempts))) => {
                 sender
-                    .send(Pin::new(&pin.clone().unwrap()))
+                    .send(Pin::new(&pin2.clone().unwrap()))
                     .expect("Failed to send PIN");
                 continue;
             }
@@ -224,39 +231,141 @@ fn sign(message: &[u8], namespace: &str, rp_id: &str) -> String {
             .recv()
             .expect("Problem receiving, unable to continue");
 
-        match sign_result {
-            Ok(assertion_object) => {
-                dbg!(assertion_object);
-                /*
-
-                let key_type = match cred.public_key.key_type {
-                    PublicKeyType::Ed25519 => "sk-ssh-ed25519@openssh.com",
-                    _ => unimplemented!(),
-                };
-                let key_type = "sk-ssh-ed25519@openssh.com";
-                let pub_key = vec![];
-
-                let signature = encode_signature_blob(
-                    &encode_publickey(key_type, &pub_key, rp_id),
-                    namespace,
-                    HASH_ALGO,
-                    &encode_signature(
-                        key_type,
-                        &assertion_object.assertion.signature,
-                        assertion_object.assertion.auth_data.flags.bits(),
-                        assertion_object.assertion.auth_data.counter,
-                    ),
-                );
-
-                let config = pem::EncodeConfig::new();
-                let config = config.set_line_ending(pem::LineEnding::LF);
-                let config = config.set_line_wrap(76);
-
-                return pem::encode_config(&Pem::new("SSH SIGNATURE", signature), config);
-                */
-                return "".to_string();
-            }
+        let assertion = match sign_result {
+            Ok(assertion_object) => assertion_object,
             Err(e) => panic!("Signing failed: {:?}", e),
+        };
+
+        let keyid = assertion.assertion.credentials.unwrap().id;
+
+        let (status_tx_2, status_rx_2) = channel::<StatusUpdate>();
+        let (pub_tx, pub_rx) = channel::<COSEKey>();
+        thread::spawn(move || loop {
+            match status_rx_2.recv() {
+                Ok(StatusUpdate::InteractiveManagement(InteractiveUpdate::StartManagement((
+                    sender,
+                    _,
+                )))) => {
+                    sender.send(authenticator::InteractiveRequest::CredentialManagement(
+                        authenticator::CredManagementCmd::GetCredentials,
+                        None,
+                    ));
+                    continue;
+                }
+                Ok(StatusUpdate::InteractiveManagement(
+                    InteractiveUpdate::CredentialManagementUpdate((
+                        CredentialManagementResult::CredentialList(creds),
+                        _,
+                    )),
+                )) => {
+                    let cred = creds
+                        .credential_list
+                        .into_iter()
+                        .flat_map(|rp| rp.credentials)
+                        .find(|cred| cred.credential_id.id == keyid)
+                        .unwrap();
+                    pub_tx.send(cred.public_key);
+                    continue;
+                }
+                Ok(StatusUpdate::InteractiveManagement(up)) => {
+                    dbg!(up);
+                    continue;
+                }
+                Ok(StatusUpdate::SelectDeviceNotice) => {
+                    println!("STATUS: Please select a device by touching one of them.");
+                }
+                Ok(StatusUpdate::PresenceRequired) => {
+                    println!("STATUS: waiting for user presence");
+                }
+                Ok(StatusUpdate::PinUvError(StatusPinUv::PinRequired(sender))) => {
+                    sender
+                        .send(Pin::new(&pin.clone().unwrap()))
+                        .expect("Failed to send PIN");
+                    continue;
+                }
+                Ok(StatusUpdate::PinUvError(StatusPinUv::InvalidPin(sender, attempts))) => {
+                    sender
+                        .send(Pin::new(&pin.clone().unwrap()))
+                        .expect("Failed to send PIN");
+                    continue;
+                }
+                Ok(StatusUpdate::PinUvError(StatusPinUv::PinAuthBlocked)) => {
+                    panic!("Too many failed attempts in one row. Your device has been temporarily blocked. Please unplug it and plug in again.")
+                }
+                Ok(StatusUpdate::PinUvError(StatusPinUv::PinBlocked)) => {
+                    panic!("Too many failed attempts. Your device has been blocked. Reset it.")
+                }
+                Ok(StatusUpdate::PinUvError(StatusPinUv::InvalidUv(attempts))) => {
+                    println!(
+                        "Wrong UV! {}",
+                        attempts.map_or("Try again.".to_string(), |a| format!(
+                            "You have {a} attempts left."
+                        ))
+                    );
+                    continue;
+                }
+                Ok(StatusUpdate::PinUvError(StatusPinUv::UvBlocked)) => {
+                    println!("Too many failed UV-attempts.");
+                    continue;
+                }
+                Ok(StatusUpdate::PinUvError(e)) => {
+                    panic!("Unexpected error: {:?}", e)
+                }
+                Ok(StatusUpdate::SelectResultNotice(index_sender, users)) => {
+                    println!("Multiple signatures returned. Select one or cancel.");
+                    index_sender.send(None).expect("Failed to send choice");
+                }
+                Err(RecvError) => {
+                    println!("STATUS: end");
+                    return;
+                }
+            }
+        });
+
+        let (mgmt_tx, mgmt_rx) = channel();
+
+        let callback_2 = StateCallback::new(Box::new(move |rv| {
+            mgmt_tx.send(rv).unwrap();
+        }));
+
+        if let Err(e) = manager.manage(0, status_tx_2, callback_2) {
+            panic!("Couldn't manage: {:?}", e);
+        }
+
+        let mgmt_result = mgmt_rx
+            .recv()
+            .expect("Problem receiving, unable to continue");
+
+        let pubkey = pub_rx.recv().unwrap();
+
+        /*
+        let key_type = match cred.public_key.key_type {
+            PublicKeyType::Ed25519 => "sk-ssh-ed25519@openssh.com",
+            _ => unimplemented!(),
+        };
+        */
+        if let COSEKeyType::OKP(key) = pubkey.key {
+            let key_type = "sk-ssh-ed25519@openssh.com";
+
+            let signature = encode_signature_blob(
+                &encode_publickey(key_type, &key.x, rp_id),
+                namespace,
+                HASH_ALGO,
+                &encode_signature(
+                    key_type,
+                    &assertion.assertion.signature,
+                    assertion.assertion.auth_data.flags.bits(),
+                    assertion.assertion.auth_data.counter,
+                ),
+            );
+
+            let config = pem::EncodeConfig::new();
+            let config = config.set_line_ending(pem::LineEnding::LF);
+            let config = config.set_line_wrap(76);
+
+            return pem::encode_config(&Pem::new("SSH SIGNATURE", signature), config);
+        } else {
+            unreachable!();
         }
     }
 }
