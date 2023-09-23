@@ -1,3 +1,11 @@
+use authenticator::authenticatorservice::AuthenticatorService;
+use authenticator::authenticatorservice::SignArgs;
+use authenticator::ctap2::server::AuthenticationExtensionsClientInputs;
+use authenticator::ctap2::server::UserVerificationRequirement;
+use authenticator::statecallback::StateCallback;
+use authenticator::Pin;
+use authenticator::StatusPinUv;
+use authenticator::StatusUpdate;
 use byteorder::BigEndian as E;
 use byteorder::WriteBytesExt;
 use clap::Parser;
@@ -7,11 +15,12 @@ use ctap_hid_fido2::Cfg;
 use ctap_hid_fido2::FidoKeyHidFactory;
 use pem::Pem;
 use secrecy::ExposeSecret;
-use secrecy::Secret;
-use secrecy::SecretString;
 use sha2::Digest;
+use sha2::Sha256;
 use sha2::Sha512;
 use std::io::Write;
+use std::sync::mpsc::channel;
+use std::thread;
 
 const MAGIC_PREAMBLE: &[u8] = b"SSHSIG";
 const SIG_VERSION: u32 = 0x01;
@@ -122,45 +131,134 @@ fn sign(message: &[u8], namespace: &str, rp_id: &str) -> String {
         None
     };
 
-    let mut config = Cfg::init();
-    config.keep_alive_msg = "".to_string();
+    let mut manager =
+        AuthenticatorService::new().expect("The auth service should initialize safely");
+    manager.add_u2f_usb_hid_platform_transports();
 
-    let device = FidoKeyHidFactory::create(&config).unwrap();
+    let (status_tx, status_rx) = channel::<StatusUpdate>();
+    thread::spawn(move || loop {
+        match status_rx.recv() {
+            Ok(StatusUpdate::InteractiveManagement(..)) => {
+                panic!("STATUS: This can't happen when doing non-interactive usage");
+            }
+            Ok(StatusUpdate::SelectDeviceNotice) => {
+                println!("STATUS: Please select a device by touching one of them.");
+            }
+            Ok(StatusUpdate::PresenceRequired) => {
+                println!("STATUS: waiting for user presence");
+            }
+            Ok(StatusUpdate::PinUvError(StatusPinUv::PinRequired(sender))) => {
+                sender
+                    .send(Pin::new(&pin.clone().unwrap()))
+                    .expect("Failed to send PIN");
+                continue;
+            }
+            Ok(StatusUpdate::PinUvError(StatusPinUv::InvalidPin(sender, attempts))) => {
+                sender
+                    .send(Pin::new(&pin.clone().unwrap()))
+                    .expect("Failed to send PIN");
+                continue;
+            }
+            Ok(StatusUpdate::PinUvError(StatusPinUv::PinAuthBlocked)) => {
+                panic!("Too many failed attempts in one row. Your device has been temporarily blocked. Please unplug it and plug in again.")
+            }
+            Ok(StatusUpdate::PinUvError(StatusPinUv::PinBlocked)) => {
+                panic!("Too many failed attempts. Your device has been blocked. Reset it.")
+            }
+            Ok(StatusUpdate::PinUvError(StatusPinUv::InvalidUv(attempts))) => {
+                println!(
+                    "Wrong UV! {}",
+                    attempts.map_or("Try again.".to_string(), |a| format!(
+                        "You have {a} attempts left."
+                    ))
+                );
+                continue;
+            }
+            Ok(StatusUpdate::PinUvError(StatusPinUv::UvBlocked)) => {
+                println!("Too many failed UV-attempts.");
+                continue;
+            }
+            Ok(StatusUpdate::PinUvError(e)) => {
+                panic!("Unexpected error: {:?}", e)
+            }
+            Ok(StatusUpdate::SelectResultNotice(index_sender, users)) => {
+                println!("Multiple signatures returned. Select one or cancel.");
+                index_sender.send(None).expect("Failed to send choice");
+            }
+            Err(RecvError) => {
+                println!("STATUS: end");
+                return;
+            }
+        }
+    });
 
-    let assertion = &device
-        .get_assertions_rk(
-            rp_id,
-            &encode_signed_data(namespace, HASH_ALGO, &Sha512::digest(message)),
-            pin.as_deref(),
-        )
-        .unwrap()[0];
-
-    let cred = &device
-        .credential_management_enumerate_credentials(pin.as_deref(), &assertion.rpid_hash)
-        .unwrap()[0];
-
-    let key_type = match cred.public_key.key_type {
-        PublicKeyType::Ed25519 => "sk-ssh-ed25519@openssh.com",
-        _ => unimplemented!(),
+    let mut challenge = Sha256::new();
+    challenge.update(message);
+    let chall_bytes = challenge.finalize().into();
+    let ctap_args = SignArgs {
+        client_data_hash: chall_bytes,
+        origin: rp_id.to_string(),
+        relying_party_id: rp_id.to_string(),
+        allow_list: vec![],
+        user_verification_req: UserVerificationRequirement::Required,
+        user_presence_req: true,
+        extensions: AuthenticationExtensionsClientInputs {
+            ..Default::default()
+        },
+        pin: None,
+        use_ctap1_fallback: false,
     };
 
-    let signature = encode_signature_blob(
-        &encode_publickey(key_type, &cred.public_key.der, rp_id),
-        namespace,
-        HASH_ALGO,
-        &encode_signature(
-            key_type,
-            &assertion.signature,
-            assertion.flags.as_u8(),
-            assertion.sign_count,
-        ),
-    );
+    loop {
+        let (sign_tx, sign_rx) = channel();
 
-    let config = pem::EncodeConfig::new();
-    let config = config.set_line_ending(pem::LineEnding::LF);
-    let config = config.set_line_wrap(76);
+        let callback = StateCallback::new(Box::new(move |rv| {
+            sign_tx.send(rv).unwrap();
+        }));
 
-    pem::encode_config(&Pem::new("SSH SIGNATURE", signature), config)
+        if let Err(e) = manager.sign(0, ctap_args, status_tx, callback) {
+            panic!("Couldn't sign: {:?}", e);
+        }
+
+        let sign_result = sign_rx
+            .recv()
+            .expect("Problem receiving, unable to continue");
+
+        match sign_result {
+            Ok(assertion_object) => {
+                dbg!(assertion_object);
+                /*
+
+                let key_type = match cred.public_key.key_type {
+                    PublicKeyType::Ed25519 => "sk-ssh-ed25519@openssh.com",
+                    _ => unimplemented!(),
+                };
+                let key_type = "sk-ssh-ed25519@openssh.com";
+                let pub_key = vec![];
+
+                let signature = encode_signature_blob(
+                    &encode_publickey(key_type, &pub_key, rp_id),
+                    namespace,
+                    HASH_ALGO,
+                    &encode_signature(
+                        key_type,
+                        &assertion_object.assertion.signature,
+                        assertion_object.assertion.auth_data.flags.bits(),
+                        assertion_object.assertion.auth_data.counter,
+                    ),
+                );
+
+                let config = pem::EncodeConfig::new();
+                let config = config.set_line_ending(pem::LineEnding::LF);
+                let config = config.set_line_wrap(76);
+
+                return pem::encode_config(&Pem::new("SSH SIGNATURE", signature), config);
+                */
+                return "".to_string();
+            }
+            Err(e) => panic!("Signing failed: {:?}", e),
+        }
+    }
 }
 
 /// OpenSSH authentication key utility
