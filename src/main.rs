@@ -11,7 +11,7 @@ use clap::{Parser, ValueEnum};
 use pem::Pem;
 use secrecy::ExposeSecret;
 use sha2::{Digest, Sha256, Sha512};
-use std::{io::Write, sync::mpsc::channel};
+use std::{cell::OnceCell, io::Write, sync::mpsc::channel};
 
 const MAGIC_PREAMBLE: &[u8] = b"SSHSIG";
 const SIG_VERSION: u32 = 0x01;
@@ -113,11 +113,10 @@ fn sign(message: &[u8], namespace: &str, rp_id: &str) -> String {
 
     manager.add_detected_transports();
 
-    let (pub_tx, pub_rx) = channel::<CredentialList>();
-
     let (tx, rx) = channel::<StatusUpdate>();
 
-    std::thread::spawn(move || -> anyhow::Result<()> {
+    let handle = std::thread::spawn(move || -> anyhow::Result<Option<CredentialList>> {
+        let mut credentials = None;
         for update in rx.iter() {
             match update {
                 StatusUpdate::InteractiveManagement(management) => match management {
@@ -133,7 +132,7 @@ fn sign(message: &[u8], namespace: &str, rp_id: &str) -> String {
                         CredentialManagementResult::CredentialList(creds),
                         _,
                     )) => {
-                        pub_tx.send(creds)?;
+                        let _ = credentials.insert(creds);
                     }
                     _ => unreachable!(),
                 },
@@ -170,7 +169,7 @@ fn sign(message: &[u8], namespace: &str, rp_id: &str) -> String {
                 }
             }
         }
-        Ok(())
+        Ok(credentials)
     });
 
     let ctap_args = SignArgs {
@@ -218,8 +217,12 @@ fn sign(message: &[u8], namespace: &str, rp_id: &str) -> String {
         result.unwrap();
     }
 
-    let pubkey = pub_rx
-        .recv()
+    drop(manager);
+
+    let pubkey = handle
+        .join()
+        .unwrap()
+        .unwrap()
         .unwrap()
         .credential_list
         .into_iter()
