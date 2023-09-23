@@ -8,9 +8,6 @@ authenticator = { version = "0.4.0-alpha.22", default-features = false, features
 base64 = "0.21.3"
 byteorder = "1.4.3"
 clap = { version = "4.4.2", features = ["derive"] }
-ctap-hid-fido2 = "3.5.0"
-ed25519 = "2.2.2"
-ed25519-dalek = { version = "2.0.0", features = ["rand_core"] }
 hex = "0.4.3"
 nom = "7"
 pem = "3.0.2"
