@@ -2,7 +2,7 @@ use authenticator::authenticatorservice::AuthenticatorService;
 use authenticator::authenticatorservice::SignArgs;
 use authenticator::crypto::COSEKey;
 use authenticator::crypto::COSEKeyType;
-use authenticator::ctap2::commands::credential_management::CredentialManagement;
+
 use authenticator::ctap2::server::AuthenticationExtensionsClientInputs;
 use authenticator::ctap2::server::UserVerificationRequirement;
 use authenticator::statecallback::StateCallback;
@@ -15,9 +15,9 @@ use byteorder::BigEndian as E;
 use byteorder::WriteBytesExt;
 use clap::Parser;
 use clap::ValueEnum;
-use ctap_hid_fido2::public_key::PublicKeyType;
-use ctap_hid_fido2::Cfg;
-use ctap_hid_fido2::FidoKeyHidFactory;
+
+
+
 use pem::Pem;
 use secrecy::ExposeSecret;
 use sha2::Digest;
@@ -71,7 +71,7 @@ fn encode_signature_blob(
     // uint32    SIG_VERSION
     buf.write_u32::<E>(SIG_VERSION).unwrap();
     // string    publickey
-    buf.write_string(&publickey).unwrap();
+    buf.write_string(publickey).unwrap();
     // string    namespace
     buf.write_string(namespace.as_bytes()).unwrap();
     // string    reserved
@@ -79,7 +79,7 @@ fn encode_signature_blob(
     // string    hash_algorithm
     buf.write_string(hash_algorithm.as_bytes()).unwrap();
     // string    signature
-    buf.write_string(&signature).unwrap();
+    buf.write_string(signature).unwrap();
     buf
 }
 
@@ -123,18 +123,12 @@ fn encode_signature(r#type: &str, signature: &[u8], flags: u8, counter: u32) -> 
 fn sign(message: &[u8], namespace: &str, rp_id: &str) -> String {
     const HASH_ALGO: &str = "sha512";
 
-    let pin = if let Some(mut input) = pinentry::PassphraseInput::with_default_binary() {
-        Some(
-            input
+    let pin = pinentry::PassphraseInput::with_default_binary().map(|mut input| input
                 .with_prompt("Enter FIDO2 Pin:")
                 .interact()
                 .unwrap()
                 .expose_secret()
-                .to_owned(),
-        )
-    } else {
-        None
-    };
+                .to_owned());
 
     let mut manager =
         AuthenticatorService::new().expect("The auth service should initialize safely");
@@ -160,7 +154,7 @@ fn sign(message: &[u8], namespace: &str, rp_id: &str) -> String {
                     .expect("Failed to send PIN");
                 continue;
             }
-            Ok(StatusUpdate::PinUvError(StatusPinUv::InvalidPin(sender, attempts))) => {
+            Ok(StatusUpdate::PinUvError(StatusPinUv::InvalidPin(sender, _attempts))) => {
                 sender
                     .send(Pin::new(&pin2.clone().unwrap()))
                     .expect("Failed to send PIN");
@@ -188,11 +182,11 @@ fn sign(message: &[u8], namespace: &str, rp_id: &str) -> String {
             Ok(StatusUpdate::PinUvError(e)) => {
                 panic!("Unexpected error: {:?}", e)
             }
-            Ok(StatusUpdate::SelectResultNotice(index_sender, users)) => {
+            Ok(StatusUpdate::SelectResultNotice(index_sender, _users)) => {
                 println!("Multiple signatures returned. Select one or cancel.");
                 index_sender.send(None).expect("Failed to send choice");
             }
-            Err(RecvError) => {
+            Err(_RecvError) => {
                 println!("STATUS: end");
                 return;
             }
@@ -287,7 +281,7 @@ fn sign(message: &[u8], namespace: &str, rp_id: &str) -> String {
                         .expect("Failed to send PIN");
                     continue;
                 }
-                Ok(StatusUpdate::PinUvError(StatusPinUv::InvalidPin(sender, attempts))) => {
+                Ok(StatusUpdate::PinUvError(StatusPinUv::InvalidPin(sender, _attempts))) => {
                     sender
                         .send(Pin::new(&pin.clone().unwrap()))
                         .expect("Failed to send PIN");
@@ -315,11 +309,11 @@ fn sign(message: &[u8], namespace: &str, rp_id: &str) -> String {
                 Ok(StatusUpdate::PinUvError(e)) => {
                     panic!("Unexpected error: {:?}", e)
                 }
-                Ok(StatusUpdate::SelectResultNotice(index_sender, users)) => {
+                Ok(StatusUpdate::SelectResultNotice(index_sender, _users)) => {
                     println!("Multiple signatures returned. Select one or cancel.");
                     index_sender.send(None).expect("Failed to send choice");
                 }
-                Err(RecvError) => {
+                Err(_RecvError) => {
                     println!("STATUS: end");
                     return;
                 }
@@ -336,7 +330,7 @@ fn sign(message: &[u8], namespace: &str, rp_id: &str) -> String {
             panic!("Couldn't manage: {:?}", e);
         }
 
-        let mgmt_result = mgmt_rx
+        let _mgmt_result = mgmt_rx
             .recv()
             .expect("Problem receiving, unable to continue");
 
