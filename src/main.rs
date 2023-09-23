@@ -1,5 +1,7 @@
 use authenticator::authenticatorservice::AuthenticatorService;
 use authenticator::authenticatorservice::SignArgs;
+use authenticator::CredManagementCmd;
+use authenticator::InteractiveRequest;
 
 use authenticator::crypto::COSEKeyType;
 
@@ -146,8 +148,8 @@ fn sign(message: &[u8], namespace: &str, rp_id: &str) -> String {
                 _,
             )))) => {
                 sender
-                    .send(authenticator::InteractiveRequest::CredentialManagement(
-                        authenticator::CredManagementCmd::GetCredentials,
+                    .send(InteractiveRequest::CredentialManagement(
+                        CredManagementCmd::GetCredentials,
                         None,
                     ))
                     .unwrap();
@@ -184,12 +186,6 @@ fn sign(message: &[u8], namespace: &str, rp_id: &str) -> String {
                     .expect("Failed to send PIN");
                 continue;
             }
-            Ok(StatusUpdate::PinUvError(StatusPinUv::PinAuthBlocked)) => {
-                panic!("Too many failed attempts in one row. Your device has been temporarily blocked. Please unplug it and plug in again.")
-            }
-            Ok(StatusUpdate::PinUvError(StatusPinUv::PinBlocked)) => {
-                panic!("Too many failed attempts. Your device has been blocked. Reset it.")
-            }
             Ok(StatusUpdate::PinUvError(StatusPinUv::InvalidUv(attempts))) => {
                 println!(
                     "Wrong UV! {}",
@@ -198,6 +194,12 @@ fn sign(message: &[u8], namespace: &str, rp_id: &str) -> String {
                     ))
                 );
                 continue;
+            }
+            Ok(StatusUpdate::PinUvError(StatusPinUv::PinAuthBlocked)) => {
+                panic!("Too many failed attempts in one row. Your device has been temporarily blocked. Please unplug it and plug in again.")
+            }
+            Ok(StatusUpdate::PinUvError(StatusPinUv::PinBlocked)) => {
+                panic!("Too many failed attempts. Your device has been blocked. Reset it.")
             }
             Ok(StatusUpdate::PinUvError(StatusPinUv::UvBlocked)) => {
                 println!("Too many failed UV-attempts.");
@@ -210,7 +212,7 @@ fn sign(message: &[u8], namespace: &str, rp_id: &str) -> String {
                 println!("Multiple signatures returned. Select one or cancel.");
                 index_sender.send(None).expect("Failed to send choice");
             }
-            Err(_RecvError) => {
+            Err(_) => {
                 println!("STATUS: end");
                 return;
             }
@@ -238,78 +240,76 @@ fn sign(message: &[u8], namespace: &str, rp_id: &str) -> String {
         use_ctap1_fallback: false,
     };
 
-    loop {
-        let (sign_tx, sign_rx) = channel();
+    let (sign_tx, sign_rx) = channel();
 
-        let callback = StateCallback::new(Box::new(move |rv| {
-            sign_tx.send(rv).unwrap();
-        }));
+    let callback = StateCallback::new(Box::new(move |rv| {
+        sign_tx.send(rv).unwrap();
+    }));
 
-        if let Err(e) = manager.sign(0, ctap_args, status_tx.clone(), callback) {
-            panic!("Couldn't sign: {:?}", e);
-        }
-
-        let sign_result = sign_rx
-            .recv()
-            .expect("Problem receiving, unable to continue");
-
-        let assertion = match sign_result {
-            Ok(assertion_object) => assertion_object,
-            Err(e) => panic!("Signing failed: {:?}", e),
-        };
-
-        let keyid = assertion.assertion.credentials.unwrap().id;
-
-        let (mgmt_tx, mgmt_rx) = channel();
-
-        let callback_2 = StateCallback::new(Box::new(move |rv| {
-            mgmt_tx.send(rv).unwrap();
-        }));
-
-        if let Err(e) = manager.manage(0, status_tx, callback_2) {
-            panic!("Couldn't manage: {:?}", e);
-        }
-
-        let _mgmt_result = mgmt_rx
-            .recv()
-            .expect("Problem receiving, unable to continue");
-
-        let pubkey = pub_rx
-            .recv()
-            .unwrap()
-            .credential_list
-            .into_iter()
-            .flat_map(|rp| rp.credentials)
-            .find(|cred| cred.credential_id.id == keyid)
-            .unwrap()
-            .public_key;
-
-        let (key_type, key) = match pubkey.key {
-            COSEKeyType::OKP(COSEOKPKey {
-                curve: Curve::Ed25519,
-                x,
-            }) => ("sk-ssh-ed25519@openssh.com", x),
-            _ => unimplemented!(),
-        };
-
-        let signature = encode_signature_blob(
-            &encode_publickey(key_type, &key, rp_id),
-            namespace,
-            HASH_ALGO,
-            &encode_signature(
-                key_type,
-                &assertion.assertion.signature,
-                assertion.assertion.auth_data.flags.bits(),
-                assertion.assertion.auth_data.counter,
-            ),
-        );
-
-        let config = pem::EncodeConfig::new();
-        let config = config.set_line_ending(pem::LineEnding::LF);
-        let config = config.set_line_wrap(76);
-
-        return pem::encode_config(&Pem::new("SSH SIGNATURE", signature), config);
+    if let Err(e) = manager.sign(0, ctap_args, status_tx.clone(), callback) {
+        panic!("Couldn't sign: {:?}", e);
     }
+
+    let sign_result = sign_rx
+        .recv()
+        .expect("Problem receiving, unable to continue");
+
+    let assertion = match sign_result {
+        Ok(assertion_object) => assertion_object,
+        Err(e) => panic!("Signing failed: {:?}", e),
+    };
+
+    let keyid = assertion.assertion.credentials.unwrap().id;
+
+    let (mgmt_tx, mgmt_rx) = channel();
+
+    let callback_2 = StateCallback::new(Box::new(move |rv| {
+        mgmt_tx.send(rv).unwrap();
+    }));
+
+    if let Err(e) = manager.manage(0, status_tx, callback_2) {
+        panic!("Couldn't manage: {:?}", e);
+    }
+
+    let _mgmt_result = mgmt_rx
+        .recv()
+        .expect("Problem receiving, unable to continue");
+
+    let pubkey = pub_rx
+        .recv()
+        .unwrap()
+        .credential_list
+        .into_iter()
+        .flat_map(|rp| rp.credentials)
+        .find(|cred| cred.credential_id.id == keyid)
+        .unwrap()
+        .public_key;
+
+    let (key_type, key) = match pubkey.key {
+        COSEKeyType::OKP(COSEOKPKey {
+            curve: Curve::Ed25519,
+            x,
+        }) => ("sk-ssh-ed25519@openssh.com", x),
+        _ => unimplemented!(),
+    };
+
+    let signature = encode_signature_blob(
+        &encode_publickey(key_type, &key, rp_id),
+        namespace,
+        HASH_ALGO,
+        &encode_signature(
+            key_type,
+            &assertion.assertion.signature,
+            assertion.assertion.auth_data.flags.bits(),
+            assertion.assertion.auth_data.counter,
+        ),
+    );
+
+    let config = pem::EncodeConfig::new();
+    let config = config.set_line_ending(pem::LineEnding::LF);
+    let config = config.set_line_wrap(76);
+
+    pem::encode_config(&Pem::new("SSH SIGNATURE", signature), config)
 }
 
 /// OpenSSH authentication key utility
